@@ -1,11 +1,32 @@
 #!/usr/bin/env bash
 # Run marker locally against a surya-ocr-2 vLLM server on vast.ai.
-# Usage: ./run_marker.sh <vast_ip> <vast_ssh_port> <gpu_type> <pdf_or_folder> [output_dir]
+# Usage: ./run_marker.sh <vast_ip> <vast_ssh_port> <gpu_type> <pdf_or_folder> [output_dir] [start_chunk]
 #   gpu_type must be a key from surya's GPU_VRAM_GB (4090, 5090, a100, l40s, h100, ...)
 #   and should match the GPU you rented: marker sizes its request concurrency from it.
+#   start_chunk is the chunk directory number (0, 50, 100, ...); leading zeros are accepted.
 set -euo pipefail
 
+if (( $# < 4 || $# > 6 )); then
+  echo "Usage: $0 <vast_ip> <vast_ssh_port> <gpu_type> <pdf_or_folder> [output_dir] [start_chunk]" >&2
+  exit 2
+fi
+
 IP=$1; SSH_PORT=$2; GPU=$3; INPUT=$4; OUT=${5:-out}
+START_CHUNK=${6:-0}
+if [[ ! $START_CHUNK =~ ^[0-9]+$ ]]; then
+  echo "start_chunk must be a nonnegative multiple of 50 (for example, 00300)." >&2
+  exit 2
+fi
+START_CHUNK=$((10#$START_CHUNK))
+if (( START_CHUNK < 0 || START_CHUNK % 50 != 0 )); then
+  echo "start_chunk must be a nonnegative multiple of 50 (for example, 00300)." >&2
+  exit 2
+fi
+if [[ -d $INPUT ]] && (( START_CHUNK != 0 )); then
+  echo "start_chunk is only supported for a single PDF." >&2
+  exit 2
+fi
+
 MODEL=datalab-to/surya-ocr-2
 LOCAL_PORT=8000
 
@@ -36,7 +57,11 @@ if [ -d "$INPUT" ]; then
 else
   NAME=$(basename "$INPUT" .pdf)
   PAGES=$(uv run python -c "import sys, pypdfium2 as p; print(len(p.PdfDocument(sys.argv[1])))" "$INPUT")
-  for ((s=0; s<PAGES; s+=50)); do
+  if (( START_CHUNK >= PAGES )); then
+    echo "start_chunk $START_CHUNK is outside this PDF ($PAGES pages)." >&2
+    exit 2
+  fi
+  for ((s=START_CHUNK; s<PAGES; s+=50)); do
     e=$(( s+49 < PAGES-1 ? s+49 : PAGES-1 ))
     uv run marker_single "$INPUT" --page_range "$s-$e" \
       --output_dir "$(printf '%s/chunks/%05d' "$OUT" "$s")" "${COMMON[@]}"
